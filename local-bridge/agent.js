@@ -1,32 +1,97 @@
 const { WebSocketServer } = require('ws');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { spawn, exec } = require('child_process');
 
 const PORT = 7420;
-const wss = new WebSocketServer({ port: PORT });
 
-// Generate random pairing code
-const pairingCode = Math.random().toString(36).substring(2, 8).toUpperCase();
+// Approved origins allowlist
+const APPROVED_ORIGINS = new Set([
+  'http://localhost:3000',
+  'https://codequest.onrender.com' // Deployed Render URL fallback
+]);
 
-console.log('=============================================');
-console.log('         CODEQUEST LOCAL BRIDGE AGENT        ');
-console.log('=============================================');
-console.log(` Server starting on: ws://localhost:${PORT}`);
-console.log(` YOUR PAIRING CODE IS: \x1b[36m${pairingCode}\x1b[0m`);
-console.log(' Enter this code in the web client to connect.');
-console.log('=============================================');
+// Read Render URL from .env if present
+const envPaths = [
+  path.join(__dirname, '.env'),
+  path.join(__dirname, '..', '.env'),
+  path.join(__dirname, '..', 'server', '.env'),
+  path.join(__dirname, '..', 'client', '.env')
+];
+
+for (const envPath of envPaths) {
+  if (fs.existsSync(envPath)) {
+    try {
+      const envContent = fs.readFileSync(envPath, 'utf8');
+      const lines = envContent.split(/\r?\n/);
+      for (const line of lines) {
+        const match = line.match(/^\s*(?:VITE_)?RENDER_URL\s*=\s*(.+)$/);
+        if (match) {
+          const val = match[1].trim().replace(/['"]/g, '');
+          if (val) {
+            APPROVED_ORIGINS.add(val);
+          }
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+}
+
+// Generate random 6-character pairing code
+function generateCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
+const currentPairingCode = generateCode();
 
 let clientAuthenticated = false;
 let currentWorkspace = null;
 let activeShell = null;
 
-wss.on('connection', (ws, req) => {
-  console.log(`Connection attempt from: ${req.socket.remoteAddress}`);
-  
-  // Set origin header checking to ensure it only comes from local or our web application
+function corsHeaders(res, origin) {
+  if (origin && APPROVED_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else {
+    // Default fallback for dev environments
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
+// Plain HTTP Server instance
+const httpServer = http.createServer((req, res) => {
   const origin = req.headers.origin;
-  console.log(`Origin: ${origin}`);
+  corsHeaders(res, origin);
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
+
+  if (req.url === '/pairing-code' && req.method === 'GET') {
+    res.setHeader('Content-Type', 'application/json');
+    res.writeHead(200);
+    return res.end(JSON.stringify({ code: currentPairingCode }));
+  }
+
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ server: httpServer });
+
+wss.on('connection', (ws, req) => {
+  const origin = req.headers.origin;
+  console.log(`Connection attempt from origin: ${origin}`);
 
   ws.on('message', async (message) => {
     let data;
@@ -36,17 +101,21 @@ wss.on('connection', (ws, req) => {
       return ws.send(JSON.stringify({ type: 'error', message: 'Invalid JSON message structure' }));
     }
 
-    const { action, payload, id } = data;
+    // Support both client formats (action vs type, payload vs code)
+    const action = data.action || data.type;
+    const payload = data.payload || data;
+    const code = data.code || payload?.code;
+    const id = data.id;
 
     // Handle pairing
     if (action === 'pair') {
-      if (payload?.code === pairingCode) {
+      if (code === currentPairingCode) {
         clientAuthenticated = true;
         console.log('Client successfully paired and authenticated.');
-        return ws.send(JSON.stringify({ id, success: true, message: 'Authenticated successfully' }));
+        return ws.send(JSON.stringify({ id, type: 'paired', success: true, message: 'Authenticated successfully' }));
       } else {
-        console.log(`Failed pairing attempt with code: ${payload?.code}`);
-        return ws.send(JSON.stringify({ id, success: false, message: 'Invalid pairing code' }));
+        console.log(`Failed pairing attempt. Received: ${code} | Expected: ${currentPairingCode}`);
+        return ws.send(JSON.stringify({ id, type: 'paired', success: false, message: 'Invalid pairing code' }));
       }
     }
 
@@ -72,7 +141,6 @@ wss.on('connection', (ws, req) => {
         case 'openFolder': {
           const folderPath = path.resolve(payload.path);
           if (!fs.existsSync(folderPath)) {
-            // Create if it doesn't exist
             fs.mkdirSync(folderPath, { recursive: true });
           }
           currentWorkspace = folderPath;
@@ -195,12 +263,10 @@ wss.on('connection', (ws, req) => {
               args = [target];
               break;
             case '.java':
-              // Run via java directly if source file launching is supported
               cmd = 'java';
               args = [target];
               break;
             case '.c':
-              // Compile first, then run
               const outputBinary = target.replace(/\.c$/, process.platform === 'win32' ? '.exe' : '');
               ws.send(JSON.stringify({ type: 'run_output', data: 'Compiling with gcc...\n' }));
               
@@ -302,3 +368,14 @@ function setupRunner(runner, ws, id) {
     ws.send(JSON.stringify({ id, success: true }));
   });
 }
+
+// Start shared HTTP Server
+httpServer.listen(PORT, () => {
+  console.log('=============================================');
+  console.log('         CODEQUEST LOCAL BRIDGE AGENT        ');
+  console.log('=============================================');
+  console.log(` Server running on: http://localhost:${PORT}`);
+  console.log(` YOUR PAIRING CODE IS: \x1b[36m${currentPairingCode}\x1b[0m`);
+  console.log(' Client app will automatically fetch & pair.');
+  console.log('=============================================');
+});

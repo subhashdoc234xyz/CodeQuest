@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { useLocalBridge } from './lib/useLocalBridge';
 import FileExplorer from './components/FileExplorer';
 import Editor from './components/Editor';
 import Terminal from './components/Terminal';
@@ -18,12 +19,18 @@ import {
   WifiOff, 
   Search,
   Sparkles,
-  Award
+  Award,
+  Loader2
 } from 'lucide-react';
 
 function CodeQuestApp() {
   const { currentUser, logout } = useAuth();
   
+  // Connect to Local Bridge automatically
+  const { status: bridgeStatus, error: bridgeErrorMsg, socket, connectWithCode } = useLocalBridge();
+  const [showManualInput, setShowManualInput] = useState(false);
+  const [manualCode, setManualCode] = useState('');
+
   // App Layout State
   const [activeTab, setActiveTab] = useState('ide'); // 'ide' or 'roadmap'
   const [rightPanelTab, setRightPanelTab] = useState('explain'); // 'explain' or 'chat'
@@ -46,63 +53,20 @@ function CodeQuestApp() {
   // Terminal & execution states
   const [terminalLogs, setTerminalLogs] = useState([
     'Welcome to CodeQuest IDE!',
-    'Connect the Local Bridge or run in Piston Sandbox mode.'
+    'Auto-detecting Local Bridge or running in Piston Sandbox mode...'
   ]);
   const [isRunning, setIsRunning] = useState(false);
   const [executionOutput, setExecutionOutput] = useState('');
 
-  // Bridge socket connection state
-  const [socketConnected, setSocketConnected] = useState(false);
-  const [pairingRequired, setPairingRequired] = useState(true);
-  const [pairingCodeInput, setPairingCodeInput] = useState('');
-  const [bridgeError, setBridgeError] = useState('');
-  const [sandboxMode, setSandboxMode] = useState(false);
-  const wsRef = useRef(null);
-
-  // Keyboard shortcut listener (Ctrl+Shift+P for command palette)
+  // Listen to WebSocket messages
   useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault();
-        setShowPalette(prev => !prev);
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+    if (!socket) return;
 
-  // Web socket handlers for Local Bridge
-  const connectBridge = (code) => {
-    setBridgeError('');
-    const ws = new WebSocket('ws://localhost:7420');
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      ws.send(JSON.stringify({
-        action: 'pair',
-        payload: { code }
-      }));
-    };
-
-    ws.onmessage = (event) => {
+    socket.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       
-      if (msg.message === 'Authenticated successfully') {
-        setSocketConnected(true);
-        setPairingRequired(false);
-        setSandboxMode(false);
-        setTerminalLogs(prev => [...prev, 'System: Successfully paired and connected to Local Bridge!']);
-        ws.send(JSON.stringify({
-          action: 'openFolder',
-          payload: { path: './workspace' }
-        }));
-      } else if (msg.message === 'Invalid pairing code') {
-        setBridgeError('Invalid pairing code. Check agent terminal output.');
-        ws.close();
-      }
-
       if (msg.workspace) {
-        ws.send(JSON.stringify({ action: 'listDir', payload: {} }));
+        socket.send(JSON.stringify({ action: 'listDir', payload: {} }));
       }
 
       if (msg.action === 'listDir' || msg.entries) {
@@ -129,31 +93,37 @@ function CodeQuestApp() {
       }
     };
 
-    ws.onerror = () => {
-      setBridgeError('Could not connect to Local Bridge. Make sure it is running on localhost:7420.');
-    };
+    setTerminalLogs(prev => [...prev, 'System: Successfully paired and connected to Local Bridge!']);
+    
+    // Open workspace
+    socket.send(JSON.stringify({
+      action: 'openFolder',
+      payload: { path: './workspace' }
+    }));
+  }, [socket]);
 
-    ws.onclose = () => {
-      setSocketConnected(false);
+  // Keyboard shortcut listener (Ctrl+Shift+P for command palette)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        setShowPalette(prev => !prev);
+      }
     };
-  };
-
-  const handlePairingSubmit = (e) => {
-    e.preventDefault();
-    if (!pairingCodeInput.trim()) return;
-    connectBridge(pairingCodeInput.trim().toUpperCase());
-  };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   const handleRefreshDir = () => {
-    if (wsRef.current && socketConnected) {
-      wsRef.current.send(JSON.stringify({ action: 'listDir', payload: {} }));
+    if (socket && bridgeStatus === 'connected') {
+      socket.send(JSON.stringify({ action: 'listDir', payload: {} }));
     }
   };
 
   const handleFileSelect = (file) => {
     setActiveFile(file);
-    if (wsRef.current && socketConnected) {
-      wsRef.current.send(JSON.stringify({
+    if (socket && bridgeStatus === 'connected') {
+      socket.send(JSON.stringify({
         action: 'readFile',
         payload: { path: file.path }
       }));
@@ -161,14 +131,14 @@ function CodeQuestApp() {
   };
 
   const handleCreateFile = (name) => {
-    if (!socketConnected) return;
+    if (!socket || bridgeStatus !== 'connected') return;
     let content = '';
     const ext = name.split('.').pop();
     if (ext === 'py') content = '# Python Starter Code\nprint("Hello World!")\n';
     else if (ext === 'js') content = '// Node.js Starter Code\nconsole.log("Hello World!");\n';
     else if (ext === 'cpp') content = '#include <iostream>\nusing namespace std;\n\nint main() {\n  cout << "Hello World!" << endl;\n  return 0;\n}\n';
 
-    wsRef.current.send(JSON.stringify({
+    socket.send(JSON.stringify({
       action: 'createFile',
       payload: { path: name, content }
     }));
@@ -176,8 +146,8 @@ function CodeQuestApp() {
   };
 
   const handleCreateFolder = (name) => {
-    if (!socketConnected) return;
-    wsRef.current.send(JSON.stringify({
+    if (!socket || bridgeStatus !== 'connected') return;
+    socket.send(JSON.stringify({
       action: 'createFolder',
       payload: { path: name }
     }));
@@ -185,8 +155,8 @@ function CodeQuestApp() {
   };
 
   const handleDeleteFile = (filePath) => {
-    if (!socketConnected) return;
-    wsRef.current.send(JSON.stringify({
+    if (!socket || bridgeStatus !== 'connected') return;
+    socket.send(JSON.stringify({
       action: 'deleteEntry',
       payload: { path: filePath }
     }));
@@ -198,8 +168,8 @@ function CodeQuestApp() {
   };
 
   const handleSaveFile = () => {
-    if (wsRef.current && socketConnected && activeFile) {
-      wsRef.current.send(JSON.stringify({
+    if (socket && bridgeStatus === 'connected' && activeFile) {
+      socket.send(JSON.stringify({
         action: 'writeFile',
         payload: { path: activeFile.path, content: editorContent }
       }));
@@ -214,8 +184,8 @@ function CodeQuestApp() {
     setExecutionOutput('');
     setIsRunning(true);
 
-    if (socketConnected && !sandboxMode) {
-      wsRef.current.send(JSON.stringify({
+    if (socket && bridgeStatus === 'connected') {
+      socket.send(JSON.stringify({
         action: 'runCode',
         payload: { path: activeFile.path }
       }));
@@ -253,8 +223,8 @@ function CodeQuestApp() {
     const filename = `${phase.title.toLowerCase().replace(/\s+/g, '-')}.js`;
     const starterTemplate = `/* Practice Phase: ${phase.title}\n${phase.description}\n*/\n\n${phase.practice_template || '// Start coding here'}\n`;
     
-    if (socketConnected) {
-      wsRef.current.send(JSON.stringify({
+    if (socket && bridgeStatus === 'connected') {
+      socket.send(JSON.stringify({
         action: 'createFile',
         payload: { path: filename, content: starterTemplate }
       }));
@@ -271,19 +241,18 @@ function CodeQuestApp() {
     }
   };
 
-  // Command palette logic
+  // Command palette choices
   const commands = [
     { name: 'Switch to IDE Editor', action: () => { setActiveTab('ide'); setShowPalette(false); } },
     { name: 'Switch to Learning Roadmap', action: () => { setActiveTab('roadmap'); setShowPalette(false); } },
     { name: 'Run Active Program', action: () => { handleRunCode(); setShowPalette(false); } },
     { name: 'Save File', action: () => { handleSaveFile(); setShowPalette(false); } },
-    { name: 'Create Practice scratchpad', action: () => { handleCreateFile('practice.js'); setShowPalette(false); } },
-    { name: 'Enable Sandbox fallback mode', action: () => { setSandboxMode(true); setPairingRequired(false); setShowPalette(false); } }
+    { name: 'Create Practice scratchpad', action: () => { handleCreateFile('practice.js'); setShowPalette(false); } }
   ];
 
   const filteredCommands = commands.filter(c => c.name.toLowerCase().includes(paletteSearch.toLowerCase()));
 
-  // Render Login forms if user not logged in
+  // Render Auth screens if logged out
   if (!currentUser) {
     if (authView === 'register') {
       return <RegisterForm onToggleForm={() => setAuthView('login')} />;
@@ -299,47 +268,67 @@ function CodeQuestApp() {
     );
   }
 
-  // Render Pairing prompt
-  if (pairingRequired && !sandboxMode) {
+  // Auto-Detecting / Connection Failed Screen
+  if (bridgeStatus === 'detecting' || bridgeStatus === 'failed') {
     return (
-      <div className="modal-overlay" style={{ background: '#0B1D3A' }}>
-        <div className="modal" style={{ maxWidth: '460px' }}>
-          <h2 className="modal-title">Connect to Local Machine</h2>
-          <p style={{ color: '#5B6472', fontSize: '0.875rem', marginBottom: '20px', lineHeight: '1.5' }}>
-            CodeQuest runs programs and manages files locally on your machine. Start the **Local Bridge agent** (`node local-bridge/agent.js`) and paste the 6-character pairing code below:
+      <div className="modal-overlay" style={{ background: '#0B1D3A', flexDirection: 'column' }}>
+        <div className="modal" style={{ maxWidth: '400px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '24px' }}>
+          {bridgeStatus === 'detecting' ? (
+            <Loader2 className="animate-spin" size={32} color="#3E6BD6" style={{ marginBottom: '16px' }} />
+          ) : (
+            <div style={{ color: '#FF5A5F', marginBottom: '16px', fontSize: '2rem' }}>⚠️</div>
+          )}
+          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#0B1D3A', textAlign: 'center' }}>
+            {bridgeStatus === 'detecting' ? 'Looking for CodeQuest Local Bridge...' : 'Connection Failed'}
+          </h3>
+          <p style={{ color: '#5B6472', fontSize: '0.8rem', marginTop: '8px', textAlign: 'center' }}>
+            {bridgeStatus === 'detecting'
+              ? "If the agent isn't running, we will fall back to sandbox mode automatically."
+              : bridgeErrorMsg || "Could not connect to Local Bridge."}
           </p>
 
-          <form onSubmit={handlePairingSubmit}>
-            <input
-              type="text"
-              className="input-field"
-              style={{ textTransform: 'uppercase', textAlign: 'center', fontSize: '1.25rem', letterSpacing: '0.2em', fontWeight: 700 }}
-              maxLength={6}
-              placeholder="CQ-CODE"
-              value={pairingCodeInput}
-              onChange={(e) => setPairingCodeInput(e.target.value)}
-            />
-            {bridgeError && (
-              <div style={{ color: '#FF5A5F', fontSize: '0.8rem', marginBottom: '16px' }}>{bridgeError}</div>
+          <div style={{ marginTop: '16px', width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            {!showManualInput ? (
+              <button
+                onClick={() => setShowManualInput(true)}
+                style={{ background: 'none', border: 'none', color: '#3E6BD6', fontSize: '0.8rem', cursor: 'pointer', textDecoration: 'underline' }}
+              >
+                Enter code manually
+              </button>
+            ) : (
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (manualCode.trim()) {
+                    connectWithCode(manualCode.trim());
+                  }
+                }}
+                style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px' }}
+              >
+                <input
+                  type="text"
+                  placeholder="Enter 6-digit pairing code"
+                  value={manualCode}
+                  onChange={(e) => setManualCode(e.target.value.toUpperCase())}
+                  style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #DDE2EB', fontSize: '0.9rem', textAlign: 'center' }}
+                  maxLength={6}
+                />
+                <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                  <button type="submit" className="btn btn-primary" style={{ padding: '6px 12px', fontSize: '0.8rem' }}>
+                    Connect
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => setShowManualInput(false)}
+                    style={{ padding: '6px 12px', fontSize: '0.8rem' }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
             )}
-            
-            <button type="submit" className="btn btn-primary" style={{ width: '100%', marginBottom: '12px' }}>
-              Establish Connect Link
-            </button>
-          </form>
-
-          <div style={{ position: 'relative', margin: '20px 0', textAlign: 'center' }}>
-            <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: '1px', background: '#E5E9F0', zIndex: 1 }}></div>
-            <span style={{ position: 'relative', zIndex: 2, background: '#FFFFFF', padding: '0 12px', fontSize: '0.8rem', color: '#5B6472' }}>OR</span>
           </div>
-
-          <button 
-            className="btn btn-secondary" 
-            style={{ width: '100%' }}
-            onClick={() => setSandboxMode(true)}
-          >
-            <Laptop size={14} /> Continue with Sandbox (No Local Bridge)
-          </button>
         </div>
       </div>
     );
@@ -347,6 +336,22 @@ function CodeQuestApp() {
 
   return (
     <div className="app-container">
+      {bridgeStatus === 'sandbox' && (
+        <div style={{
+          background: '#FFF9E6',
+          borderBottom: '1px solid #FFE5A3',
+          padding: '8px 16px',
+          fontSize: '0.85rem',
+          color: '#8A6D1C',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          gap: '8px',
+          zIndex: 10
+        }}>
+          <span>Running in sandbox mode — start the Local Bridge for full local file/terminal access.</span>
+        </div>
+      )}
       {/* Top Navbar */}
       <header className="navbar">
         <div className="brand">
@@ -373,17 +378,14 @@ function CodeQuestApp() {
             <span>{xp} XP</span>
           </div>
 
-          {socketConnected ? (
+          {bridgeStatus === 'connected' ? (
             <span style={{ color: '#3EBE7A', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem' }}>
               <Wifi size={14} /> Local Bridge Linked
             </span>
           ) : (
-            <button 
-              style={{ background: 'transparent', border: 'none', color: '#FF5A5F', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', cursor: 'pointer' }}
-              onClick={() => { setPairingRequired(true); setSandboxMode(false); }}
-            >
-              <WifiOff size={14} /> Bridge Off
-            </button>
+            <span style={{ color: '#FF5A5F', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem' }}>
+              <WifiOff size={14} /> Sandbox Mode
+            </span>
           )}
 
           <button className="btn btn-secondary" style={{ padding: '6px' }} onClick={logout} title="Sign Out">
@@ -426,15 +428,15 @@ function CodeQuestApp() {
             <Terminal
               terminalLogs={terminalLogs}
               onTerminalInput={(val) => {
-                if (wsRef.current && socketConnected) {
-                  wsRef.current.send(JSON.stringify({ action: 'shellInput', payload: { input: val } }));
+                if (socket && bridgeStatus === 'connected') {
+                  socket.send(JSON.stringify({ action: 'shellInput', payload: { input: val } }));
                 }
               }}
               onRunCode={handleRunCode}
               activeFile={activeFile}
               isRunning={isRunning}
-              isBridgeConnected={socketConnected}
-              sandboxMode={sandboxMode}
+              isBridgeConnected={bridgeStatus === 'connected'}
+              sandboxMode={bridgeStatus !== 'connected'}
             />
           </div>
 
