@@ -1,0 +1,12 @@
+{
+  "name": "codequest-local-bridge",
+  "version": "1.0.0",
+  "description": "Local Bridge agent for CodeQuest IDE",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
