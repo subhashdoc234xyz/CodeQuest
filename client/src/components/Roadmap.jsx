@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { jsPDF } from 'jspdf';
 import { Calendar, Search, Award, CheckCircle, ExternalLink, FileText, Download } from 'lucide-react';
+import ShareButton from './ShareButton';
 
 export default function Roadmap({ onOpenPracticeFile, xp, setXp, streak, setStreak }) {
   const [topic, setTopic] = useState('');
@@ -150,9 +151,20 @@ export default function Roadmap({ onOpenPracticeFile, xp, setXp, streak, setStre
             <button className="btn btn-secondary" onClick={() => setRoadmap(null)}>
               ← Back to Generator
             </button>
-            <button className="btn btn-primary" onClick={handleExportPDF}>
-              <Download size={14} /> Export Roadmap PDF
-            </button>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+              <ShareButton
+                getBlobFn={async () => {
+                  const json = JSON.stringify(roadmap, null, 2);
+                  return new Blob([json], { type: "application/json" });
+                }}
+                folder="roadmaps"
+                filename={`${roadmap.topic.replace(/\s+/g, "-").toLowerCase()}-roadmap.json`}
+                label="Share Roadmap"
+              />
+              <button className="btn btn-primary" onClick={handleExportPDF}>
+                <Download size={14} /> Export PDF
+              </button>
+            </div>
           </div>
 
           <div className="dashboard-card">

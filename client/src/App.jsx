@@ -1,16 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { supabase } from './lib/supabaseClient';
+import { AuthProvider, useAuth } from './context/AuthContext';
 import FileExplorer from './components/FileExplorer';
 import Editor from './components/Editor';
 import Terminal from './components/Terminal';
 import Visualizer from './components/Visualizer';
 import LightChat from './components/LightChat';
 import Roadmap from './components/Roadmap';
+import LoginForm from './components/auth/LoginForm';
+import RegisterForm from './components/auth/RegisterForm';
+import ForgotPassword from './components/auth/ForgotPassword';
 import { 
   Code, 
   Map, 
   LogOut, 
-  Terminal as TermIcon, 
   Laptop, 
   Wifi, 
   WifiOff, 
@@ -19,17 +21,13 @@ import {
   Award
 } from 'lucide-react';
 
-export default function App() {
-  // Auth state
-  const [user, setUser] = useState(null);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [authError, setAuthError] = useState('');
-
+function CodeQuestApp() {
+  const { currentUser, logout } = useAuth();
+  
   // App Layout State
   const [activeTab, setActiveTab] = useState('ide'); // 'ide' or 'roadmap'
   const [rightPanelTab, setRightPanelTab] = useState('explain'); // 'explain' or 'chat'
+  const [authView, setAuthView] = useState('login'); // 'login', 'register', 'forgot'
 
   // XP / Streak
   const [xp, setXp] = useState(100);
@@ -61,38 +59,7 @@ export default function App() {
   const [sandboxMode, setSandboxMode] = useState(false);
   const wsRef = useRef(null);
 
-  // Load user profile on mount
-  useEffect(() => {
-    const checkUser = async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        setUser(user);
-        // Load settings if any
-      }
-    };
-    checkUser();
-  }, []);
-
-  const handleAuth = async (e) => {
-    e.preventDefault();
-    setAuthError('');
-    if (isSignUp) {
-      const { data, error } = await supabase.auth.signUp({ email, password });
-      if (error) setAuthError(error.message);
-      else setUser(data.user);
-    } else {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setAuthError(error.message);
-      else setUser(data.user);
-    }
-  };
-
-  const handleSignOut = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-  };
-
-  // Keyboard shortcut listener (Ctrl+Shift+P for command palette, Ctrl+S for saving)
+  // Keyboard shortcut listener (Ctrl+Shift+P for command palette)
   useEffect(() => {
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
@@ -111,7 +78,6 @@ export default function App() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      // Send pairing action immediately
       ws.send(JSON.stringify({
         action: 'pair',
         payload: { code }
@@ -126,7 +92,6 @@ export default function App() {
         setPairingRequired(false);
         setSandboxMode(false);
         setTerminalLogs(prev => [...prev, 'System: Successfully paired and connected to Local Bridge!']);
-        // Open workspace folder
         ws.send(JSON.stringify({
           action: 'openFolder',
           payload: { path: './workspace' }
@@ -137,7 +102,6 @@ export default function App() {
       }
 
       if (msg.workspace) {
-        // Refresh directory listing
         ws.send(JSON.stringify({ action: 'listDir', payload: {} }));
       }
 
@@ -180,7 +144,6 @@ export default function App() {
     connectBridge(pairingCodeInput.trim().toUpperCase());
   };
 
-  // Directory operations
   const handleRefreshDir = () => {
     if (wsRef.current && socketConnected) {
       wsRef.current.send(JSON.stringify({ action: 'listDir', payload: {} }));
@@ -199,7 +162,6 @@ export default function App() {
 
   const handleCreateFile = (name) => {
     if (!socketConnected) return;
-    // Multi language Boilerplate templates
     let content = '';
     const ext = name.split('.').pop();
     if (ext === 'py') content = '# Python Starter Code\nprint("Hello World!")\n';
@@ -246,7 +208,6 @@ export default function App() {
     }
   };
 
-  // Run Program (Bridge compiler execution, falling back to Piston sandbox)
   const handleRunCode = async () => {
     if (!activeFile) return;
     setTerminalLogs(prev => [...prev, `\n> Running ${activeFile.name}...`]);
@@ -259,7 +220,6 @@ export default function App() {
         payload: { path: activeFile.path }
       }));
     } else {
-      // Fallback sandbox using Piston API
       const ext = activeFile.name.split('.').pop();
       let language = 'javascript';
       if (ext === 'py') language = 'python';
@@ -289,7 +249,6 @@ export default function App() {
     }
   };
 
-  // Open Practice file from Roadmap
   const handleOpenPracticeFile = (phase) => {
     const filename = `${phase.title.toLowerCase().replace(/\s+/g, '-')}.js`;
     const starterTemplate = `/* Practice Phase: ${phase.title}\n${phase.description}\n*/\n\n${phase.practice_template || '// Start coding here'}\n`;
@@ -305,7 +264,6 @@ export default function App() {
         setTerminalLogs(prev => [...prev, `Created practice file: ${filename}`]);
       }, 300);
     } else {
-      // In sandbox mode, load directly to editor without local bridge
       setActiveFile({ name: filename, path: filename, isDirectory: false });
       setEditorContent(starterTemplate);
       setActiveTab('ide');
@@ -313,7 +271,7 @@ export default function App() {
     }
   };
 
-  // Command palette choices filtering
+  // Command palette logic
   const commands = [
     { name: 'Switch to IDE Editor', action: () => { setActiveTab('ide'); setShowPalette(false); } },
     { name: 'Switch to Learning Roadmap', action: () => { setActiveTab('roadmap'); setShowPalette(false); } },
@@ -325,57 +283,23 @@ export default function App() {
 
   const filteredCommands = commands.filter(c => c.name.toLowerCase().includes(paletteSearch.toLowerCase()));
 
-  // Render Login state
-  if (!user) {
+  // Render Login forms if user not logged in
+  if (!currentUser) {
+    if (authView === 'register') {
+      return <RegisterForm onToggleForm={() => setAuthView('login')} />;
+    }
+    if (authView === 'forgot') {
+      return <ForgotPassword onBackToLogin={() => setAuthView('login')} />;
+    }
     return (
-      <div className="modal-overlay" style={{ background: '#0B1D3A' }}>
-        <div className="modal" style={{ maxWidth: '400px' }}>
-          <div className="brand" style={{ justifyContent: 'center', marginBottom: '24px', fontSize: '1.5rem' }}>
-            <span>🚀 CodeQuest</span>
-          </div>
-          <h2 className="modal-title" style={{ textAlign: 'center' }}>
-            {isSignUp ? 'Create learning account' : 'Welcome back'}
-          </h2>
-          <form onSubmit={handleAuth} style={{ display: 'flex', flexDirection: 'column' }}>
-            <input
-              type="email"
-              className="input-field"
-              placeholder="Email address"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-            />
-            <input
-              type="password"
-              className="input-field"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-            {authError && <div style={{ color: '#FF5A5F', fontSize: '0.8rem', marginBottom: '12px' }}>{authError}</div>}
-            
-            <button type="submit" className="btn btn-primary" style={{ width: '100%', padding: '12px' }}>
-              {isSignUp ? 'Sign Up' : 'Log In'}
-            </button>
-          </form>
-          <div style={{ textAlign: 'center', marginTop: '16px', fontSize: '0.85rem' }}>
-            <span style={{ color: '#5B6472' }}>
-              {isSignUp ? 'Already have an account? ' : "Don't have an account? "}
-            </span>
-            <button 
-              onClick={() => setIsSignUp(!isSignUp)}
-              style={{ background: 'transparent', border: 'none', color: '#3E6BD6', fontWeight: 600, cursor: 'pointer' }}
-            >
-              {isSignUp ? 'Log In' : 'Sign Up'}
-            </button>
-          </div>
-        </div>
-      </div>
+      <LoginForm 
+        onToggleForm={() => setAuthView('register')} 
+        onForgot={() => setAuthView('forgot')} 
+      />
     );
   }
 
-  // Render Pairing mode selection
+  // Render Pairing prompt
   if (pairingRequired && !sandboxMode) {
     return (
       <div className="modal-overlay" style={{ background: '#0B1D3A' }}>
@@ -462,7 +386,7 @@ export default function App() {
             </button>
           )}
 
-          <button className="btn btn-secondary" style={{ padding: '6px' }} onClick={handleSignOut} title="Sign Out">
+          <button className="btn btn-secondary" style={{ padding: '6px' }} onClick={logout} title="Sign Out">
             <LogOut size={16} />
           </button>
         </div>
@@ -471,7 +395,6 @@ export default function App() {
       {/* Main Workspace Frame */}
       {activeTab === 'ide' ? (
         <div className="ide-layout">
-          {/* Sidebar tabs */}
           <div className="sidebar-tabs">
             <div className={`tab-icon ${rightPanelTab === 'explain' ? 'active' : ''}`} onClick={() => setRightPanelTab('explain')} title="Explain & Visualize">
               <Code size={20} />
@@ -481,7 +404,6 @@ export default function App() {
             </div>
           </div>
 
-          {/* Left panel Folder Tree */}
           <FileExplorer
             files={files}
             activeFile={activeFile}
@@ -492,7 +414,6 @@ export default function App() {
             onRefresh={handleRefreshDir}
           />
 
-          {/* Central Workspace: Editor + Terminal */}
           <div className="central-workspace">
             <div className="editor-wrapper">
               <Editor
@@ -517,7 +438,6 @@ export default function App() {
             />
           </div>
 
-          {/* Right panel assistant/visualizer */}
           <div className="right-panel">
             {rightPanelTab === 'explain' ? (
               <Visualizer
@@ -582,5 +502,13 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <CodeQuestApp />
+    </AuthProvider>
   );
 }
